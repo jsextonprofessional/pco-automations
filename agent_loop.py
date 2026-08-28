@@ -3,6 +3,8 @@ Agent loop for the song-tracking sync.
 
 Wraps the four functions in song_tools.py as model-callable tools.
 No framework — just the raw call -> execute -> feed back -> repeat loop.
+
+to do - turn hardcoded latency and usage from hardcoded to programmatic.
 """
 
 import json
