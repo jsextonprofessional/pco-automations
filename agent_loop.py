@@ -7,6 +7,7 @@ No framework — just the raw call -> execute -> feed back -> repeat loop.
 
 import json
 import os
+import time
 
 from dotenv import load_dotenv
 import anthropic
@@ -121,11 +122,20 @@ SYSTEM_PROMPT = (
 
 MAX_ITERS = 10
 
+# claude-sonnet-5 rates, per token — update if pricing changes.
+INPUT_RATE_PER_TOKEN = 2.00 / 1_000_000
+OUTPUT_RATE_PER_TOKEN = 10.00 / 1_000_000
+
 
 def run():
     messages = [{"role": "user", "content": "Run this week's sync."}]
 
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_latency = 0.0
+
     for i in range(MAX_ITERS):
+        start = time.perf_counter()
         resp = client.messages.create(
             model="claude-sonnet-5",
             max_tokens=1024,
@@ -133,11 +143,21 @@ def run():
             tools=TOOLS,
             messages=messages,
         )
+        latency = time.perf_counter() - start
+
+        in_tok = resp.usage.input_tokens
+        out_tok = resp.usage.output_tokens
+        total_input_tokens += in_tok
+        total_output_tokens += out_tok
+        total_latency += latency
+        print(f"[iter {i}] API call: {latency:.2f}s, input={in_tok} tokens, output={out_tok} tokens")
+
         messages.append({"role": "assistant", "content": resp.content})
 
         calls = [b for b in resp.content if b.type == "tool_use"]
         if not calls:
             final_text = "".join(b.text for b in resp.content if b.type == "text")
+            _print_summary(i + 1, total_latency, total_input_tokens, total_output_tokens)
             print(f"\nDone:\n{final_text}")
             return
 
@@ -151,6 +171,17 @@ def run():
         messages.append({"role": "user", "content": results})
 
     raise RuntimeError(f"Hit MAX_ITERS ({MAX_ITERS}) without finishing.")
+
+
+def _print_summary(api_calls, total_latency, total_input_tokens, total_output_tokens):
+    cost = total_input_tokens * INPUT_RATE_PER_TOKEN + total_output_tokens * OUTPUT_RATE_PER_TOKEN
+    print(
+        f"\n--- run summary ---\n"
+        f"API calls: {api_calls}\n"
+        f"Total latency: {total_latency:.2f}s\n"
+        f"Tokens: {total_input_tokens} in / {total_output_tokens} out\n"
+        f"Estimated cost: ${cost:.5f}"
+    )
 
 
 if __name__ == "__main__":
