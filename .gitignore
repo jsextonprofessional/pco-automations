@@ -1,0 +1,24 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment variables & secrets
+.env
+*.json
+!package.json
+!tsconfig.json
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# OS / Editor artifacts
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
