@@ -91,15 +91,19 @@ WORKSHEET_NAME=2026
 ## Verifying Setup
 
 ### Test Planning Center connection:
+
 ```bash
 python verify_pco.py
 ```
+
 Lists available service types and recent plans, then prints songs found in a selected plan.
 
 ### Test Google Sheets connection:
+
 ```bash
 python verify_sheets.py
 ```
+
 Appends a test row to the configured worksheet. Remember to remove the test row from the sheet afterward.
 
 ---
@@ -107,12 +111,15 @@ Appends a test row to the configured worksheet. Remember to remove the test row 
 ## Usage
 
 ### 1. Regular Weekly Sync
+
 Runs the latest completed service plan and updates Column A:
+
 ```bash
 python pco_script.py
 ```
 
 ### 2. Historical Backfill
+
 To backfill multiple plans chronologically:
 
 ```bash

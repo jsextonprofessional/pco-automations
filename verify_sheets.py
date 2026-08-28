@@ -4,7 +4,7 @@ Verify Google Sheets write access.
 Before running this:
 1. Open your service account's JSON key file and copy the "client_email" value.
 2. Open the target Google Sheet, click Share, and add that client_email as an Editor.
-   (Skip this and you'll get a 403 PERMISSION_DENIED error below.)
+  (Skip this and you'll get a 403 PERMISSION_DENIED error below.)
 3. Ensure .env has GOOGLE_SERVICE_ACCOUNT_FILE, SPREADSHEET_ID, and WORKSHEET_NAME configured.
 
 Then run:
