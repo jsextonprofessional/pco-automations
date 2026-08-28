@@ -1,11 +1,8 @@
 """
-PCO Song Bank Sync — tool functions
+PCO Song Bank Sync
 
-Same read/write logic as pco_script.py, split into four standalone
-functions so each can become an individually-callable tool for the
-agent loop. Matches the sheet's existing format: "Title M/D, M/D"
-(no colon), header rows skipped, titles matched case-insensitively,
-already-recorded dates skipped on rerun.
+Fetches songs from the most recent Planning Center plan for your service
+and updates Column A of the 2026 Google Sheet with the date played.
 """
 
 import os
@@ -17,7 +14,10 @@ import gspread
 import requests
 from requests.auth import HTTPBasicAuth
 
+# Load environment variables from .env
 load_dotenv()
+
+# --- Configuration -----------------------------------------------------------
 
 PCO_CLIENT_ID = os.getenv("PCO_CLIENT_ID")
 PCO_SECRET = os.getenv("PCO_SECRET")
@@ -37,6 +37,8 @@ _DATE_START_REGEX = re.compile(
     r"^(.*?)(?::\s*|\s+)(\d{1,2}/\d{1,2}.*|\d{4}-\d{2}-\d{2}.*)$"
 )
 
+# --- Planning Center API ------------------------------------------------------
+
 PCO_BASE = "https://api.planningcenteronline.com/services/v2"
 _pco_auth = HTTPBasicAuth(PCO_CLIENT_ID, PCO_SECRET)
 _pco_headers = {"Accept": "application/json"}
@@ -48,22 +50,23 @@ def pco_get(url, params=None):
     return resp.json()
 
 
-def get_this_weeks_songs():
+def get_latest_plan_and_songs(service_type_id=PCO_SERVICE_TYPE_ID):
     """
-    Song titles + service date (M/D) from the most recently completed plan.
-    Returns (song_titles, sing_date).
+    Fetch the most recent past/completed plan and its songs.
+    Returns (plan_info, song_titles, formatted_date).
     """
     plans = pco_get(
-        f"{PCO_BASE}/service_types/{PCO_SERVICE_TYPE_ID}/plans",
+        f"{PCO_BASE}/service_types/{service_type_id}/plans",
         params={"filter": "past", "per_page": 5, "order": "-sort_date"},
     )
     if not plans.get("data"):
+        # Fallback to general order by -sort_date <= today if filter: past returns empty
         plans = pco_get(
-            f"{PCO_BASE}/service_types/{PCO_SERVICE_TYPE_ID}/plans",
+            f"{PCO_BASE}/service_types/{service_type_id}/plans",
             params={"per_page": 20, "order": "-sort_date"},
         )
     if not plans.get("data"):
-        raise RuntimeError(f"No plans found for service type {PCO_SERVICE_TYPE_ID}.")
+        raise RuntimeError(f"No plans found for service type {service_type_id}.")
 
     today_str = date.today().isoformat()
     selected_plan = None
@@ -77,6 +80,8 @@ def get_this_weeks_songs():
 
     plan_id = selected_plan["id"]
     sort_date = selected_plan["attributes"].get("sort_date", "")
+
+    # Format date as M/D (e.g., 8/23) to match sheet conventions
     if sort_date:
         dt = datetime.fromisoformat(sort_date.replace("Z", "+00:00"))
         sing_date = f"{dt.month}/{dt.day}"
@@ -84,77 +89,119 @@ def get_this_weeks_songs():
         today = date.today()
         sing_date = f"{today.month}/{today.day}"
 
-    items = pco_get(f"{PCO_BASE}/service_types/{PCO_SERVICE_TYPE_ID}/plans/{plan_id}/items")
+    items = pco_get(f"{PCO_BASE}/service_types/{service_type_id}/plans/{plan_id}/items")
     songs = [
         item["attributes"]["title"].strip()
         for item in items.get("data", [])
         if item["attributes"].get("item_type") == "song" and item["attributes"].get("title")
     ]
-    return songs, sing_date
+
+    return selected_plan, songs, sing_date
 
 
-def get_existing_songs(ws):
+# --- Google Sheets (Column A) -------------------------------------------------
+
+def get_column_a_songs(worksheet):
     """
-    {normalized_title: {row, title, dates, raw}} read from Column A,
-    skipping the first two header rows.
+    Read Column A and return a dictionary:
+    {
+        normalized_title: {
+            'row': row_number,
+            'title': original_title,
+            'dates': dates_string,
+            'raw': raw_cell_value
+        }
+    }
     """
-    col_a_values = ws.col_values(1)
-    existing = {}
+    col_a_values = worksheet.col_values(1)
+    existing_songs = {}
+
+    # Skip header row(s) (first 2 rows)
     for row_idx, val in enumerate(col_a_values, start=1):
         if row_idx <= 2 or not val.strip():
             continue
+
         raw = val.strip()
         m = _DATE_START_REGEX.match(raw)
         if m:
-            title, dates = m.group(1).strip(), m.group(2).strip()
+            title = m.group(1).strip()
+            dates = m.group(2).strip()
         else:
-            title, dates = raw, ""
-        existing[title.lower()] = {"row": row_idx, "title": title, "dates": dates, "raw": raw}
-    return existing
+            title = raw
+            dates = ""
+
+        norm_title = title.lower()
+        existing_songs[norm_title] = {
+            "row": row_idx,
+            "title": title,
+            "dates": dates,
+            "raw": raw,
+        }
+
+    return existing_songs, len(col_a_values)
 
 
-def append_date_to_song(ws, entry, sing_date):
-    """
-    Add sing_date to an existing song's row. Returns None (no-op) if
-    that date is already recorded — safe to call on reruns.
-    """
-    date_tokens = [d.strip() for d in re.split(r",\s*", entry["dates"])] if entry["dates"] else []
-    if sing_date in date_tokens:
-        return None
-    new_val = (
-        f"{entry['title']} {entry['dates']}, {sing_date}"
-        if entry["dates"]
-        else f"{entry['title']} {sing_date}"
-    )
-    ws.update_cell(entry["row"], 1, new_val)
-    return new_val
+def sync_songs_to_sheet():
+    # 1. Connect to Google Sheets
+    print(f"Connecting to Google Sheet '{SPREADSHEET_ID}', tab '{WORKSHEET_NAME}'...")
+    gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    ws = sh.worksheet(WORKSHEET_NAME)
 
+    # 2. Get songs from Planning Center
+    print(f"Fetching recent plan and songs from Planning Center (Service Type {PCO_SERVICE_TYPE_ID})...")
+    plan, songs, sing_date = get_latest_plan_and_songs(PCO_SERVICE_TYPE_ID)
+    plan_date_label = plan["attributes"].get("dates", sing_date)
+    print(f"Plan ID {plan['id']} ({plan_date_label}) - Service Date: {sing_date}")
+    print(f"Found {len(songs)} song(s): {songs}\n")
 
-def create_song_entry(ws, title, sing_date):
-    """Add a new row at the bottom of Column A."""
-    new_val = f"{title} {sing_date}"
-    ws.append_row([new_val])
-    return new_val
+    if not songs:
+        print("No songs found in this plan.")
+        return
+
+    # 3. Read existing songs in Column A
+    existing_songs, last_row = get_column_a_songs(ws)
+
+    # 4. Process each song
+    for song_title in songs:
+        norm_title = song_title.lower()
+
+        if norm_title in existing_songs:
+            entry = existing_songs[norm_title]
+            row_num = entry["row"]
+            existing_dates = entry["dates"]
+
+            # Check if date is already recorded
+            date_tokens = [d.strip() for d in re.split(r",\s*", existing_dates)]
+            if sing_date in date_tokens or any(d.startswith(sing_date) for d in date_tokens):
+                print(f"[SKIPPED] '{entry['title']}' already has date {sing_date} in Row {row_num}")
+                continue
+
+            if existing_dates:
+                new_val = f"{entry['title']} {existing_dates}, {sing_date}"
+            else:
+                new_val = f"{entry['title']} {sing_date}"
+
+            ws.update_cell(row_num, 1, new_val)
+
+            # Update local cache
+            entry["dates"] = f"{existing_dates}, {sing_date}" if existing_dates else sing_date
+            entry["raw"] = new_val
+
+            print(f"[UPDATED] Row {row_num:2d}: '{new_val}'")
+        else:
+            # Create a new entry at the bottom of Column A
+            new_val = f"{song_title} {sing_date}"
+            ws.append_row([new_val])
+            last_row += 1
+            existing_songs[norm_title] = {
+                "row": last_row,
+                "title": song_title,
+                "dates": sing_date,
+                "raw": new_val,
+            }
+            print(f"[CREATED] Row {last_row:2d}: '{new_val}'")
 
 
 if __name__ == "__main__":
-    gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
-    ws = gc.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
-
-    songs, sing_date = get_this_weeks_songs()
-    print(f"This week's songs ({sing_date}):", songs)
-
-    existing = get_existing_songs(ws)
-    print("Existing tracked songs:", list(existing.keys()))
-
-    for title in songs:
-        key = title.lower()
-        if key in existing:
-            result = append_date_to_song(ws, existing[key], sing_date)
-            if result:
-                print(f"Updated: {result}")
-            else:
-                print(f"Skipped (already recorded): {existing[key]['title']}")
-        else:
-            result = create_song_entry(ws, title, sing_date)
-            print(f"Created: {result}")
+    sync_songs_to_sheet()
