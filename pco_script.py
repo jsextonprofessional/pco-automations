@@ -147,6 +147,33 @@ def get_column_a_songs(worksheet):
     return existing_songs, len(col_a_values)
 
 
+def resolve_worksheet(sh, configured_name, service_year):
+    """
+    If configured_name looks like a bare year (e.g. "2026"), treat it as
+    a year-tracking tab: when service_year doesn't match, switch to (or
+    create) the worksheet named for service_year instead. Any other
+    configured_name (e.g. "TEST") is used exactly as given, with no
+    rollover behavior — keeps manual/test overrides unaffected.
+    """
+    if not re.fullmatch(r"\d{4}", configured_name):
+        return sh.worksheet(configured_name)
+
+    target_name = str(service_year)
+    if target_name == configured_name:
+        return sh.worksheet(configured_name)
+
+    print(f"[YEAR ROLLOVER] Service year {target_name} != configured tab '{configured_name}'.")
+    try:
+        ws = sh.worksheet(target_name)
+        print(f"Using existing worksheet '{target_name}'.")
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"Creating new worksheet '{target_name}'.")
+        ws = sh.add_worksheet(title=target_name, rows=1000, cols=5)
+        ws.update_cell(1, 1, f"{target_name} Song Bank")
+        ws.update_cell(2, 1, "Familiar Contemporary Songs")
+    return ws
+
+
 def sync_songs_to_sheet():
     """
     Sync this week's songs to the sheet.
@@ -156,18 +183,23 @@ def sync_songs_to_sheet():
     errors (auth failure, no plan found, etc.) — the caller is
     responsible for catching and reporting those.
     """
-    # 1. Connect to Google Sheets
-    print(f"Connecting to Google Sheet '{SPREADSHEET_ID}', tab '{WORKSHEET_NAME}'...")
-    gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(WORKSHEET_NAME)
-
-    # 2. Get songs from Planning Center
+    # 1. Get songs from Planning Center first — the worksheet to write
+    # to depends on the service's actual year, so this has to happen
+    # before connecting to Sheets now.
     print(f"Fetching recent plan and songs from Planning Center (Service Type {PCO_SERVICE_TYPE_ID})...")
     plan, songs, sing_date = get_latest_plan_and_songs(PCO_SERVICE_TYPE_ID)
     plan_date_label = plan["attributes"].get("dates", sing_date)
     print(f"Plan ID {plan['id']} ({plan_date_label}) - Service Date: {sing_date}")
     print(f"Found {len(songs)} song(s): {songs}\n")
+
+    sort_date = plan["attributes"].get("sort_date", "")
+    service_year = sort_date[:4] if sort_date else str(date.today().year)
+
+    # 2. Connect to Google Sheets, resolving year-rollover if configured
+    print(f"Connecting to Google Sheet '{SPREADSHEET_ID}' (configured tab '{WORKSHEET_NAME}')...")
+    gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    ws = resolve_worksheet(sh, WORKSHEET_NAME, service_year)
 
     summary = {"sing_date": sing_date, "created": [], "updated": [], "skipped": []}
 

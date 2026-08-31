@@ -5,38 +5,18 @@ in-memory fake worksheet. Nothing here touches a real Google Sheet or
 the real Planning Center API.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pco_script
+from tests.fakes import FakeSpreadsheet, FakeWorksheet, patch_gspread
 
 
-class FakeWorksheet:
-    """In-memory worksheet: column A only, 1-indexed rows."""
-
-    def __init__(self, initial_rows=None):
-        self.rows = list(initial_rows or [])  # index 0 = row 1
-
-    def col_values(self, col):
-        assert col == 1
-        return list(self.rows)
-
-    def update_cell(self, row, col, value):
-        assert col == 1
-        self.rows[row - 1] = value
-
-    def append_row(self, values):
-        self.rows.append(values[0])
-
-
-def fake_gspread(monkeypatch, initial_rows=None):
+def fake_gspread(monkeypatch, initial_rows=None, worksheet_name="TEST"):
     """Patches gspread.service_account so sync_songs_to_sheet() writes
     to an in-memory FakeWorksheet instead of a real Google Sheet."""
     ws = FakeWorksheet(initial_rows)
-    fake_sheet = MagicMock()
-    fake_sheet.worksheet.return_value = ws
-    fake_client = MagicMock()
-    fake_client.open_by_key.return_value = fake_sheet
-    monkeypatch.setattr(pco_script.gspread, "service_account", lambda filename: fake_client)
+    spreadsheet = FakeSpreadsheet({worksheet_name: ws})
+    patch_gspread(monkeypatch, pco_script, spreadsheet)
     return ws
 
 
@@ -122,3 +102,29 @@ def test_no_header_rows_still_works_end_to_end(monkeypatch):
 
     assert summary["updated"] == ["Song A"]
     assert ws.rows == ["Song A 8/23, 8/30"]
+
+
+def test_sync_triggers_year_rollover_when_configured_tab_is_stale(monkeypatch):
+    """Proves the rollover wiring works end to end, not just the
+    isolated resolve_worksheet unit — conftest.py sets WORKSHEET_NAME
+    to "TEST" by default, so this test overrides it to a bare year to
+    exercise the rollover path specifically."""
+    monkeypatch.setattr(pco_script, "WORKSHEET_NAME", "2026")
+
+    old_ws = FakeWorksheet(["Old Song 1/1"])
+    spreadsheet = FakeSpreadsheet({"2026": old_ws})
+    patch_gspread(monkeypatch, pco_script, spreadsheet)
+
+    fake_plan = {
+        "id": "p1",
+        "attributes": {"dates": "January 3, 2027", "sort_date": "2027-01-03T09:00:00Z"},
+    }
+
+    with patch("pco_script.get_latest_plan_and_songs", return_value=(fake_plan, ["New Year Song"], "1/3")):
+        summary = pco_script.sync_songs_to_sheet()
+
+    assert spreadsheet.added == ["2027"]
+    new_ws = spreadsheet.worksheet("2027")
+    assert summary["created"] == ["New Year Song"]
+    assert new_ws.rows[-1] == "New Year Song 1/3"
+    assert new_ws.rows[0] == "2027 Song Bank"
