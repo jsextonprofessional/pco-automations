@@ -112,7 +112,7 @@ def test_sync_triggers_year_rollover_when_configured_tab_is_stale(monkeypatch):
     monkeypatch.setattr(pco_script, "WORKSHEET_NAME", "2026")
 
     old_ws = FakeWorksheet(["Old Song 1/1"])
-    spreadsheet = FakeSpreadsheet({"2026": old_ws})
+    spreadsheet = FakeSpreadsheet({"2026": old_ws, "Run Log": FakeWorksheet([])})
     patch_gspread(monkeypatch, pco_script, spreadsheet)
 
     fake_plan = {

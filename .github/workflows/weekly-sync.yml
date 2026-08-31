@@ -1,0 +1,66 @@
+name: Weekly Song Bank Sync
+
+on:
+  schedule:
+    # GitHub Actions cron always runs in UTC and does NOT adjust for
+    # daylight saving time — pick one offset and accept it'll drift an
+    # hour for about half the year, or update this manually twice a
+    # year if the exact time matters.
+    #
+    # Examples (adjust the hour to your actual timezone):
+    #   Eastern, winter (EST): 13 UTC = 8:00 AM
+    #   Eastern, summer (EDT): 13 UTC = 9:00 AM
+    #   Central, winter (CST): 14 UTC = 8:00 AM
+    #   Pacific, winter (PST): 16 UTC = 8:00 AM
+    - cron: "0 13 * * 1" # Monday 8:00 AM Eastern — adjust as needed
+  workflow_dispatch: # lets you trigger a run manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required for the heartbeat commit step to push back
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service account credentials
+        run: echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > service_account.json
+
+      - name: Run sync
+        env:
+          PCO_CLIENT_ID: ${{ secrets.PCO_CLIENT_ID }}
+          PCO_SECRET: ${{ secrets.PCO_SECRET }}
+          PCO_SERVICE_TYPE_ID: ${{ secrets.PCO_SERVICE_TYPE_ID }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
+          WORKSHEET_NAME: "2026"
+        run: python pco_script.py
+
+      # The steps below run even if "Run sync" fails (if: always()) —
+      # the heartbeat commit exists specifically to keep GitHub's
+      # 60-day auto-disable from ever triggering, which matters most
+      # during a stretch of failures, not despite them. The job's
+      # overall status still reports failure if the sync step failed,
+      # so failure notifications are unaffected.
+
+      - name: Record run timestamp
+        if: always()
+        run: date -u +"%Y-%m-%d %H:%M:%S UTC" > last_run.txt
+
+      - name: Commit heartbeat file
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_run.txt
+          git diff --staged --quiet || git commit -m "chore: automated sync heartbeat"
+          git push

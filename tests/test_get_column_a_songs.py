@@ -89,3 +89,20 @@ def test_dict_key_is_lowercase_but_title_preserves_original_casing():
     existing, _ = get_column_a_songs(ws)
     assert "build my life" in existing
     assert existing["build my life"]["title"] == "BUILD MY LIFE"
+
+
+def test_run_log_style_line_would_be_misparsed_if_ever_in_same_column():
+    """
+    Demonstrates why the run log must live in its own tab, not proven
+    by argument: a line in the log's actual format gets parsed as a
+    bogus song. (Verified by running it, not predicted — the actual
+    split point isn't where you'd expect: nothing precedes the leading
+    ISO date to act as a separator, so the regex backtracks past it
+    entirely and matches on the M/D-style date later in the string
+    instead, producing an absurd "title" that swallows most of the line.)
+    """
+    ws = FakeWorksheet(["2026-08-31 09:00:00 UTC — Service 8/30: 4 created, 0 updated, 0 skipped"])
+    existing, _ = get_column_a_songs(ws)
+    assert len(existing) == 1  # the collision is real, not hypothetical
+    bogus_title = next(iter(existing.values()))["title"]
+    assert bogus_title == "2026-08-31 09:00:00 UTC — Service"

@@ -8,7 +8,7 @@ and updates Column A of the 2026 Google Sheet with the date played.
 import os
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from dotenv import load_dotenv
 
 import gspread
@@ -37,6 +37,8 @@ if not SPREADSHEET_ID:
 _DATE_START_REGEX = re.compile(
     r"^(.*?)(?::\s*|\s+)(\d{1,2}/\d{1,2}.*|\d{4}-\d{2}-\d{2}.*)$"
 )
+
+RUN_LOG_WORKSHEET_NAME = "Run Log"
 
 # --- Planning Center API ------------------------------------------------------
 
@@ -174,6 +176,29 @@ def resolve_worksheet(sh, configured_name, service_year):
     return ws
 
 
+def log_run_to_sheet(sh, summary, sing_date):
+    """
+    Append a status line to a dedicated 'Run Log' tab — deliberately
+    NOT the same tab as tracked songs. A line in this format matches
+    the same "Title <dates>" pattern get_column_a_songs() uses to
+    detect real song rows and would get silently parsed as a song with
+    an empty title if it ever ended up in that column (see
+    test_run_log_style_line_would_be_misparsed_if_ever_in_same_column).
+    """
+    try:
+        log_ws = sh.worksheet(RUN_LOG_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        log_ws = sh.add_worksheet(title=RUN_LOG_WORKSHEET_NAME, rows=1000, cols=1)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = (
+        f"{timestamp} — Service {sing_date}: "
+        f"{len(summary['created'])} created, {len(summary['updated'])} updated, "
+        f"{len(summary['skipped'])} skipped"
+    )
+    log_ws.append_row([line])
+
+
 def sync_songs_to_sheet():
     """
     Sync this week's songs to the sheet.
@@ -205,6 +230,7 @@ def sync_songs_to_sheet():
 
     if not songs:
         print("No songs found in this plan.")
+        _try_log_run(sh, summary, sing_date)
         return summary
 
     # 3. Read existing songs in Column A
@@ -253,7 +279,18 @@ def sync_songs_to_sheet():
             print(f"[CREATED] Row {last_row:2d}: '{new_val}'")
             summary["created"].append(song_title)
 
+    _try_log_run(sh, summary, sing_date)
     return summary
+
+
+def _try_log_run(sh, summary, sing_date):
+    """log_run_to_sheet, but a failure here (e.g. a transient write
+    error on the log tab) shouldn't mark an otherwise-successful sync
+    as failed."""
+    try:
+        log_run_to_sheet(sh, summary, sing_date)
+    except Exception as exc:
+        print(f"[WARNING] Could not write to '{RUN_LOG_WORKSHEET_NAME}' tab: {exc}")
 
 
 def print_summary(summary):
