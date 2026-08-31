@@ -2,17 +2,13 @@ name: Weekly Song Bank Sync
 
 on:
   schedule:
-    # GitHub Actions cron always runs in UTC and does NOT adjust for
-    # daylight saving time — pick one offset and accept it'll drift an
-    # hour for about half the year, or update this manually twice a
-    # year if the exact time matters.
-    #
-    # Examples (adjust the hour to your actual timezone):
-    #   Eastern, winter (EST): 13 UTC = 8:00 AM
-    #   Eastern, summer (EDT): 13 UTC = 9:00 AM
-    #   Central, winter (CST): 14 UTC = 8:00 AM
-    #   Pacific, winter (PST): 16 UTC = 8:00 AM
-    - cron: "0 13 * * 1" # Monday 8:00 AM Eastern — adjust as needed
+    # Monday 12:00 PM Central (CDT, UTC-5). GitHub Actions cron is
+    # always UTC and does not adjust for daylight saving time — this
+    # will fire at 11:00 AM Central instead once DST ends (~early
+    # November) and Central shifts to CST (UTC-6). Change 17 to 18 then
+    # if you want it to stay at true noon; otherwise the hour of drift
+    # doesn't affect correctness, just timing.
+    - cron: "0 17 * * 1"
   workflow_dispatch: # lets you trigger a run manually from the Actions tab
 
 jobs:
