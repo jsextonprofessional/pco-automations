@@ -7,6 +7,7 @@ and updates Column A of the 2026 Google Sheet with the date played.
 
 import os
 import re
+import sys
 from datetime import date, datetime
 from dotenv import load_dotenv
 
@@ -112,24 +113,29 @@ def get_column_a_songs(worksheet):
             'raw': raw_cell_value
         }
     }
+
+    A row counts as song data only if it matches the "Title <dates>"
+    pattern — not based on row position. Real song rows always have at
+    least one date (create_song_entry never writes a bare title), so
+    anything that doesn't match is a header, a blank, or stray text,
+    wherever it happens to sit in the column.
     """
     col_a_values = worksheet.col_values(1)
     existing_songs = {}
 
-    # Skip header row(s) (first 2 rows)
     for row_idx, val in enumerate(col_a_values, start=1):
-        if row_idx <= 2 or not val.strip():
+        if not val.strip():
             continue
 
         raw = val.strip()
         m = _DATE_START_REGEX.match(raw)
-        if m:
-            title = m.group(1).strip()
-            dates = m.group(2).strip()
-        else:
-            title = raw
-            dates = ""
+        if not m:
+            # Doesn't look like "Title <dates>" — header row or stray
+            # text, not song data. Skip regardless of row position.
+            continue
 
+        title = m.group(1).strip()
+        dates = m.group(2).strip()
         norm_title = title.lower()
         existing_songs[norm_title] = {
             "row": row_idx,
@@ -142,6 +148,14 @@ def get_column_a_songs(worksheet):
 
 
 def sync_songs_to_sheet():
+    """
+    Sync this week's songs to the sheet.
+
+    Returns a summary dict: {"sing_date", "created", "updated", "skipped"}
+    (the latter three are lists of song titles). Raises on unrecoverable
+    errors (auth failure, no plan found, etc.) — the caller is
+    responsible for catching and reporting those.
+    """
     # 1. Connect to Google Sheets
     print(f"Connecting to Google Sheet '{SPREADSHEET_ID}', tab '{WORKSHEET_NAME}'...")
     gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
@@ -155,9 +169,11 @@ def sync_songs_to_sheet():
     print(f"Plan ID {plan['id']} ({plan_date_label}) - Service Date: {sing_date}")
     print(f"Found {len(songs)} song(s): {songs}\n")
 
+    summary = {"sing_date": sing_date, "created": [], "updated": [], "skipped": []}
+
     if not songs:
         print("No songs found in this plan.")
-        return
+        return summary
 
     # 3. Read existing songs in Column A
     existing_songs, last_row = get_column_a_songs(ws)
@@ -175,6 +191,7 @@ def sync_songs_to_sheet():
             date_tokens = [d.strip() for d in re.split(r",\s*", existing_dates)]
             if sing_date in date_tokens or any(d.startswith(sing_date) for d in date_tokens):
                 print(f"[SKIPPED] '{entry['title']}' already has date {sing_date} in Row {row_num}")
+                summary["skipped"].append(entry["title"])
                 continue
 
             if existing_dates:
@@ -189,6 +206,7 @@ def sync_songs_to_sheet():
             entry["raw"] = new_val
 
             print(f"[UPDATED] Row {row_num:2d}: '{new_val}'")
+            summary["updated"].append(entry["title"])
         else:
             # Create a new entry at the bottom of Column A
             new_val = f"{song_title} {sing_date}"
@@ -201,7 +219,24 @@ def sync_songs_to_sheet():
                 "raw": new_val,
             }
             print(f"[CREATED] Row {last_row:2d}: '{new_val}'")
+            summary["created"].append(song_title)
+
+    return summary
+
+
+def print_summary(summary):
+    print("\n--- sync summary ---")
+    print(f"Service date: {summary['sing_date']}")
+    print(f"Created: {len(summary['created'])} — {summary['created']}")
+    print(f"Updated: {len(summary['updated'])} — {summary['updated']}")
+    print(f"Skipped (already recorded): {len(summary['skipped'])} — {summary['skipped']}")
 
 
 if __name__ == "__main__":
-    sync_songs_to_sheet()
+    try:
+        result = sync_songs_to_sheet()
+        print_summary(result)
+    except Exception as exc:
+        print(f"\n[FAILED] Sync did not complete: {exc}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
