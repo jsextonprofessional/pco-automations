@@ -95,20 +95,23 @@ def get_this_weeks_songs():
 
 def get_existing_songs(ws):
     """
-    {normalized_title: {row, title, dates, raw}} read from Column A,
-    skipping the first two header rows.
+    {normalized_title: {row, title, dates, raw}} read from Column A.
+
+    A row counts as song data only if it matches the "Title <dates>"
+    pattern — not based on row position. Real song rows always have at
+    least one date, so anything that doesn't match is a header, a
+    blank, or stray text, wherever it sits in the column.
     """
     col_a_values = ws.col_values(1)
     existing = {}
     for row_idx, val in enumerate(col_a_values, start=1):
-        if row_idx <= 2 or not val.strip():
+        if not val.strip():
             continue
         raw = val.strip()
         m = _DATE_START_REGEX.match(raw)
-        if m:
-            title, dates = m.group(1).strip(), m.group(2).strip()
-        else:
-            title, dates = raw, ""
+        if not m:
+            continue
+        title, dates = m.group(1).strip(), m.group(2).strip()
         existing[title.lower()] = {"row": row_idx, "title": title, "dates": dates, "raw": raw}
     return existing
 
