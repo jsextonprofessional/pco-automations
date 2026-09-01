@@ -3,8 +3,6 @@ Agent loop for the song-tracking sync.
 
 Wraps the four functions in song_tools.py as model-callable tools.
 No framework — just the raw call -> execute -> feed back -> repeat loop.
-
-to do - turn hardcoded latency and usage from hardcoded to programmatic.
 """
 
 import json
@@ -24,13 +22,15 @@ from song_tools import (
     SPREADSHEET_ID,
     WORKSHEET_NAME,
 )
+from sheet_utils import log_agent_run
 
 load_dotenv()
 
 client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 
 gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
-ws = gc.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
+sh = gc.open_by_key(SPREADSHEET_ID)
+ws = sh.worksheet(WORKSHEET_NAME)
 
 TOOLS = [
     {
@@ -159,8 +159,13 @@ def run():
         calls = [b for b in resp.content if b.type == "tool_use"]
         if not calls:
             final_text = "".join(b.text for b in resp.content if b.type == "text")
+            cost = total_input_tokens * INPUT_RATE_PER_TOKEN + total_output_tokens * OUTPUT_RATE_PER_TOKEN
             _print_summary(i + 1, total_latency, total_input_tokens, total_output_tokens)
             print(f"\nDone:\n{final_text}")
+            log_agent_run(
+                sh, "agent_loop.py", "SUCCESS",
+                f"{i + 1} API calls, ${cost:.5f} — {final_text[:150]}",
+            )
             return
 
         results = []
@@ -172,6 +177,7 @@ def run():
             )
         messages.append({"role": "user", "content": results})
 
+    log_agent_run(sh, "agent_loop.py", "FAILED", f"Hit MAX_ITERS ({MAX_ITERS}) without finishing")
     raise RuntimeError(f"Hit MAX_ITERS ({MAX_ITERS}) without finishing.")
 
 

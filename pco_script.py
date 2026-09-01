@@ -21,7 +21,9 @@ from requests.auth import HTTPBasicAuth
 from sheet_utils import (
     get_column_a_songs,
     get_or_create_year_worksheet,
-    get_or_create_run_log_tab,
+    write_new_song_row,
+    log_line_to_run_log,
+    log_agent_run,
     RUN_LOG_WORKSHEET_NAME,
     utc_timestamp,
 )
@@ -110,19 +112,22 @@ def get_latest_plan_and_songs(service_type_id=PCO_SERVICE_TYPE_ID):
 def resolve_worksheet(sh, configured_name, service_year):
     """
     If configured_name looks like a bare year (e.g. "2026"), treat it as
-    a year-tracking tab: when service_year doesn't match, switch to (or
-    create) the worksheet named for service_year instead. Any other
-    configured_name (e.g. "TEST") is used exactly as given, with no
-    rollover behavior — keeps manual/test overrides unaffected.
+    a year-tracking tab: get_or_create_year_worksheet handles finding
+    it, creating it if missing, and flagging it if an existing tab
+    doesn't look like one our automation created — this now applies
+    whether or not a rollover is actually happening, so the common
+    no-rollover weekly sync gets the same safety check, not just an
+    actual rollover event. Any other configured_name (e.g. "TEST") is
+    used exactly as given, with none of this — keeps manual/test
+    overrides unaffected.
     """
     if not re.fullmatch(r"\d{4}", configured_name):
         return sh.worksheet(configured_name)
 
     target_name = str(service_year)
-    if target_name == configured_name:
-        return sh.worksheet(configured_name)
+    if target_name != configured_name:
+        print(f"[YEAR ROLLOVER] Service year {target_name} != configured tab '{configured_name}'.")
 
-    print(f"[YEAR ROLLOVER] Service year {target_name} != configured tab '{configured_name}'.")
     return get_or_create_year_worksheet(sh, target_name)
 
 
@@ -135,12 +140,11 @@ def log_run_to_sheet(sh, summary, sing_date):
     song if it ever ended up in that column.
     """
     line = (
-        f"{utc_timestamp()} — Service {sing_date}: "
+        f"{utc_timestamp()} — pco_script.py SUCCESS: Service {sing_date}: "
         f"{len(summary['created'])} created, {len(summary['updated'])} updated, "
         f"{len(summary['skipped'])} skipped"
     )
-    log_ws = get_or_create_run_log_tab(sh)
-    log_ws.append_row([line])
+    log_line_to_run_log(sh, line)
 
 
 def _try_log_run(sh, summary, sing_date):
@@ -154,14 +158,7 @@ def _try_log_run(sh, summary, sing_date):
 
 
 def _try_log_failure(sh, error_msg):
-    """Best-effort: write a failure entry to the Run Log tab. Swallows
-    any error here (e.g. if the Sheets connection itself is what broke) —
-    the caller already has the real error via stderr and re-raises it."""
-    try:
-        log_ws = get_or_create_run_log_tab(sh)
-        log_ws.append_row([f"{utc_timestamp()} — FAILED: {error_msg}"])
-    except Exception as log_exc:
-        print(f"[WARNING] Could not log failure to '{RUN_LOG_WORKSHEET_NAME}' tab: {log_exc}", file=sys.stderr)
+    log_agent_run(sh, "pco_script.py", "FAILED", error_msg)
 
 
 def sync_songs_to_sheet():
@@ -234,8 +231,8 @@ def sync_songs_to_sheet():
                 summary["updated"].append(entry["title"])
             else:
                 new_val = f"{song_title} {sing_date}"
-                ws.append_row([new_val])
                 last_row += 1
+                write_new_song_row(ws, last_row, new_val)
                 existing_songs[norm_title] = {
                     "row": last_row,
                     "title": song_title,

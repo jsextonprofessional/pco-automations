@@ -33,6 +33,12 @@ class FakeWorksheet:
             self.rows.append("")
         self.rows[row - 1] = value
 
+    def cell(self, row, col):
+        assert col == 1
+        from types import SimpleNamespace
+        value = self.rows[row - 1] if row - 1 < len(self.rows) else None
+        return SimpleNamespace(value=value)
+
     def append_row(self, values):
         self.rows.append(values[0])
 
