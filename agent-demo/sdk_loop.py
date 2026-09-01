@@ -40,9 +40,11 @@ from song_tools import (
     SPREADSHEET_ID,
     WORKSHEET_NAME,
 )
+from sheet_utils import log_agent_run
 
 gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
-ws = gc.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
+sh = gc.open_by_key(SPREADSHEET_ID)
+ws = sh.worksheet(WORKSHEET_NAME)
 
 # Scratchpad — same role it played in agent_loop.py: translates the
 # model's song_title string back into the real row entry.
@@ -177,15 +179,24 @@ options = ClaudeAgentOptions(
 
 
 async def main():
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query("Run this week's sync.")
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        print(block.text)
-            else:
-                print(msg)
+    final_text_parts = []
+    try:
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query("Run this week's sync.")
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            print(block.text)
+                            final_text_parts.append(block.text)
+                else:
+                    print(msg)
+    except Exception as exc:
+        log_agent_run(sh, "sdk_loop.py", "FAILED", str(exc))
+        raise
+
+    summary_text = " ".join(final_text_parts)[:150] or "completed with no summary text"
+    log_agent_run(sh, "sdk_loop.py", "SUCCESS", summary_text)
 
 
 if __name__ == "__main__":

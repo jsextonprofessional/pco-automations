@@ -77,11 +77,27 @@ def test_slash_in_title_not_mistaken_for_date():
     assert existing[key]["dates"] == "3/1"
 
 
-def test_blank_rows_are_skipped_but_counted_in_last_row():
+def test_interior_blank_rows_dont_affect_last_content_row():
     ws = FakeWorksheet(["Build My Life 1/4", "", "  ", "Holy Forever 1/11"])
     existing, last_row = get_column_a_songs(ws)
     assert len(existing) == 2
-    assert last_row == 4  # len(col_a_values) includes the blanks
+    assert last_row == 4  # last real content is row 4; interior blanks don't matter
+
+
+def test_trailing_blanks_do_not_inflate_last_content_row():
+    """
+    Regression test for the actual production bug: gspread's
+    col_values() can return a list padded with blank entries beyond
+    column A's real content, when other columns have data further
+    down than column A does. last_content_row must reflect the true
+    last non-blank row in column A, not len(col_a_values) — trusting
+    len() there caused new songs to be written far below where column
+    A's real content actually ends.
+    """
+    ws = FakeWorksheet(["Build My Life 1/4", "Holy Forever 1/11", "", "", ""])
+    existing, last_row = get_column_a_songs(ws)
+    assert len(existing) == 2
+    assert last_row == 2  # NOT 5 — trailing blanks must be ignored
 
 
 def test_dict_key_is_lowercase_but_title_preserves_original_casing():

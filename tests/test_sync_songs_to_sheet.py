@@ -106,7 +106,22 @@ def test_no_header_rows_still_works_end_to_end(monkeypatch):
     assert ws.rows == ["Song A 8/23, 8/30"]
 
 
-def test_sync_triggers_year_rollover_when_configured_tab_is_stale(monkeypatch):
+def test_new_song_lands_at_correct_row_despite_trailing_blanks(monkeypatch):
+    """
+    Integration-level regression test for the actual production bug:
+    a sheet where col_values(1) returns trailing blanks (simulating
+    other columns having data further down than column A) must still
+    get new songs written immediately after column A's real content —
+    not scattered to wherever len(col_a_values) would have pointed.
+    """
+    ws = fake_gspread(monkeypatch, initial_rows=["Existing Song 8/2", "", "", ""])
+    fake_plan = {"id": "p1", "attributes": {"dates": "8/30"}}
+
+    with patch("pco_script.get_latest_plan_and_songs", return_value=(fake_plan, ["New Song"], "8/30")):
+        summary = pco_script.sync_songs_to_sheet()
+
+    assert summary["created"] == ["New Song"]
+    assert ws.rows[1] == "New Song 8/30"  # row 2, right after the real content — not row 5
     """Proves the rollover wiring works end to end, not just the
     isolated resolve_worksheet unit — conftest.py sets WORKSHEET_NAME
     to "TEST" by default, so this test overrides it to a bare year to

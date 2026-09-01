@@ -6,6 +6,8 @@ here touches a real API.
 
 from unittest.mock import patch
 
+import pytest
+
 import backfill
 from tests.fakes import FakeSpreadsheet, FakeWorksheet, patch_gspread
 
@@ -113,3 +115,79 @@ def test_no_matching_plans_returns_zeroed_summary_without_error(monkeypatch):
 
     assert summary == {"plans_processed": 0, "created": 0, "updated": 0, "skipped": 0}
     assert spreadsheet.added == []
+
+
+def test_new_song_lands_at_correct_row_despite_trailing_blanks(monkeypatch):
+    """
+    Same regression as pco_script.py's version: a year tab where
+    col_values(1) has trailing blanks must still get new songs written
+    right after the real content, not scattered further down.
+    """
+    existing_ws = FakeWorksheet(["Old Song 1/1", "", "", ""])
+    spreadsheet = FakeSpreadsheet({"2023": existing_ws, "Run Log": FakeWorksheet([])})
+    # Match the header check so this doesn't also trigger the legacy-tab warning
+    existing_ws.rows[0] = "Old Song 1/1"
+    patch_gspread(monkeypatch, backfill, spreadsheet)
+
+    plan = make_plan("p1", "2023-09-03T09:00:00Z", "September 3, 2023")
+
+    def fake_pco_get(url, params=None):
+        if "/items" not in url:
+            return {"data": [plan], "links": {}}
+        return make_items(["New Song"])
+
+    with patch("backfill.pco_get", side_effect=fake_pco_get):
+        summary = backfill.run_backfill(service_type_id="fake_service_type")
+
+    assert summary["created"] == 1
+    assert existing_ws.rows[1] == "New Song 9/3"  # row 2, not row 5
+
+
+def test_failure_mid_plan_logs_resume_point_to_run_log(monkeypatch):
+    """
+    Mirrors the actual 429 quota scenario: fails partway through
+    writing a plan's songs. The Run Log entry should identify which
+    plan date it was on, so a resumed run knows the right --start.
+    """
+    log_ws = FakeWorksheet([])
+    spreadsheet = FakeSpreadsheet({"Run Log": log_ws})
+    patch_gspread(monkeypatch, backfill, spreadsheet)
+
+    plan = make_plan("p1", "2023-09-03T09:00:00Z", "September 3, 2023")
+
+    def fake_pco_get(url, params=None):
+        if "/items" not in url:
+            return {"data": [plan], "links": {}}
+        return make_items(["Song That Fails"])
+
+    def failing_get_column_a_songs(ws):
+        raise RuntimeError("simulated 429 quota exceeded")
+
+    with patch("backfill.pco_get", side_effect=fake_pco_get):
+        with patch("backfill.get_column_a_songs", side_effect=failing_get_column_a_songs):
+            with pytest.raises(RuntimeError):
+                backfill.run_backfill(service_type_id="fake_service_type")
+
+    assert len(log_ws.rows) == 1
+    assert "FAILED" in log_ws.rows[0]
+    assert "backfill.py" in log_ws.rows[0]
+    assert "2023-09-03" in log_ws.rows[0]
+    assert "simulated 429 quota exceeded" in log_ws.rows[0]
+
+
+def test_failure_before_sheets_connection_does_not_crash_on_missing_sh(monkeypatch, capsys):
+    """If gspread.service_account itself fails, there's no sh to log
+    to — should raise cleanly, not crash referencing a connection that
+    was never established."""
+
+    def failing_service_account(filename):
+        raise RuntimeError("bad credentials")
+
+    monkeypatch.setattr(backfill.gspread, "service_account", failing_service_account)
+
+    with pytest.raises(RuntimeError):
+        backfill.run_backfill(service_type_id="fake_service_type")
+
+    captured = capsys.readouterr()
+    assert "FAILED" in captured.err
+    assert "connecting to Google Sheets" in captured.err
