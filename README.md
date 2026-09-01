@@ -153,3 +153,23 @@ The `pco-song-bank-scrape-and-fill-*.json` file (and any Google Cloud service ac
   1. Immediately delete or disable the key in [Google Cloud IAM & Admin > Service Accounts > Keys](https://console.cloud.google.com/iam-admin/serviceaccounts).
   2. Generate a new key and update your local `.env`.
   3. Revoke any leaked Personal Access Tokens in Planning Center and issue new ones.
+
+### Case Study
+
+This project serves as a case study in automating repetitive clerical work. Formerly, I used to have to go through Good Shepherd's Planning Center, find the most recent service, locate the 4 songs, and then manually add them to the Song Bank. In the Song Bank, I would also have to manually look up each song to see if there was already an existing entry for that song so I can determine if I update an existing song or create a new entry. There is also the backfill, which is something I procrastinated doing for almost a year bc of its tedious nature - going through all PCO services dating back to 2022 and logging the song entries to the song bank. This would take forever and be mind numbing.
+
+This project automates that work, and also a way for me to explore and deep dive creating agents. There are three paths created for POCs, but only one lives in production.
+
+1. An agent using Claude's RAW API
+
+- Simple enough to implement for this task, but token usage is still too expensive compared to a script and and cron job that only runs once a week (falling in GitHub Actions' free tier)
+
+2. An agent using Claude SDK
+
+- The most robuts option but very much overkill for this task. It has 20+ built in tools that are expensive to call and require being manually turned off. Also the config requires more manual intervention or it will risk using the most expensive model and bill against the wrong token budget (client vs platform).
+
+3. Python script with a cron job
+
+- This is the solution in production. It is the simplest and cheapest. A Python script that runs weekly on a cron job. Falls in GitHub's free tier and handles all the work needed.
+
+There is also the backfill script. There isn't much of a reason for it to be used again as the backfills have already been performed. It is such a powerful tool in its ability to quickly process a lot of data, that google rate limits it - 🤠. Leaving it in for future reference. Can also come in handy if we ever create a new song bank.
