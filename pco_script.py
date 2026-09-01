@@ -2,18 +2,29 @@
 PCO Song Bank Sync
 
 Fetches songs from the most recent Planning Center plan for your service
-and updates Column A of the 2026 Google Sheet with the date played.
+and updates Column A of the correct year's Google Sheet with the date
+played. Automatically switches to a new year's worksheet when the
+service's year no longer matches the configured one.
 """
 
 import os
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime
+
 from dotenv import load_dotenv
 
 import gspread
 import requests
 from requests.auth import HTTPBasicAuth
+
+from sheet_utils import (
+    get_column_a_songs,
+    get_or_create_year_worksheet,
+    get_or_create_run_log_tab,
+    RUN_LOG_WORKSHEET_NAME,
+    utc_timestamp,
+)
 
 # Load environment variables from .env
 load_dotenv()
@@ -32,13 +43,6 @@ if not PCO_CLIENT_ID or not PCO_SECRET:
     raise ValueError("Missing PCO_CLIENT_ID or PCO_SECRET in environment / .env file.")
 if not SPREADSHEET_ID:
     raise ValueError("Missing SPREADSHEET_ID in environment / .env file.")
-
-# Matches "Title 1/4, 2/18" or "Title: 1/4, 2/18" or "Title: 2026-01-04"
-_DATE_START_REGEX = re.compile(
-    r"^(.*?)(?::\s*|\s+)(\d{1,2}/\d{1,2}.*|\d{4}-\d{2}-\d{2}.*)$"
-)
-
-RUN_LOG_WORKSHEET_NAME = "Run Log"
 
 # --- Planning Center API ------------------------------------------------------
 
@@ -63,7 +67,6 @@ def get_latest_plan_and_songs(service_type_id=PCO_SERVICE_TYPE_ID):
         params={"filter": "past", "per_page": 5, "order": "-sort_date"},
     )
     if not plans.get("data"):
-        # Fallback to general order by -sort_date <= today if filter: past returns empty
         plans = pco_get(
             f"{PCO_BASE}/service_types/{service_type_id}/plans",
             params={"per_page": 20, "order": "-sort_date"},
@@ -84,7 +87,6 @@ def get_latest_plan_and_songs(service_type_id=PCO_SERVICE_TYPE_ID):
     plan_id = selected_plan["id"]
     sort_date = selected_plan["attributes"].get("sort_date", "")
 
-    # Format date as M/D (e.g., 8/23) to match sheet conventions
     if sort_date:
         dt = datetime.fromisoformat(sort_date.replace("Z", "+00:00"))
         sing_date = f"{dt.month}/{dt.day}"
@@ -102,51 +104,7 @@ def get_latest_plan_and_songs(service_type_id=PCO_SERVICE_TYPE_ID):
     return selected_plan, songs, sing_date
 
 
-# --- Google Sheets (Column A) -------------------------------------------------
-
-def get_column_a_songs(worksheet):
-    """
-    Read Column A and return a dictionary:
-    {
-        normalized_title: {
-            'row': row_number,
-            'title': original_title,
-            'dates': dates_string,
-            'raw': raw_cell_value
-        }
-    }
-
-    A row counts as song data only if it matches the "Title <dates>"
-    pattern — not based on row position. Real song rows always have at
-    least one date (create_song_entry never writes a bare title), so
-    anything that doesn't match is a header, a blank, or stray text,
-    wherever it happens to sit in the column.
-    """
-    col_a_values = worksheet.col_values(1)
-    existing_songs = {}
-
-    for row_idx, val in enumerate(col_a_values, start=1):
-        if not val.strip():
-            continue
-
-        raw = val.strip()
-        m = _DATE_START_REGEX.match(raw)
-        if not m:
-            # Doesn't look like "Title <dates>" — header row or stray
-            # text, not song data. Skip regardless of row position.
-            continue
-
-        title = m.group(1).strip()
-        dates = m.group(2).strip()
-        norm_title = title.lower()
-        existing_songs[norm_title] = {
-            "row": row_idx,
-            "title": title,
-            "dates": dates,
-            "raw": raw,
-        }
-
-    return existing_songs, len(col_a_values)
+# --- Google Sheets --------------------------------------------------------
 
 
 def resolve_worksheet(sh, configured_name, service_year):
@@ -165,15 +123,7 @@ def resolve_worksheet(sh, configured_name, service_year):
         return sh.worksheet(configured_name)
 
     print(f"[YEAR ROLLOVER] Service year {target_name} != configured tab '{configured_name}'.")
-    try:
-        ws = sh.worksheet(target_name)
-        print(f"Using existing worksheet '{target_name}'.")
-    except gspread.exceptions.WorksheetNotFound:
-        print(f"Creating new worksheet '{target_name}'.")
-        ws = sh.add_worksheet(title=target_name, rows=1000, cols=5)
-        ws.update_cell(1, 1, f"{target_name} Song Bank")
-        ws.update_cell(2, 1, "Familiar Contemporary Songs")
-    return ws
+    return get_or_create_year_worksheet(sh, target_name)
 
 
 def log_run_to_sheet(sh, summary, sing_date):
@@ -181,106 +131,16 @@ def log_run_to_sheet(sh, summary, sing_date):
     Append a status line to a dedicated 'Run Log' tab — deliberately
     NOT the same tab as tracked songs. A line in this format matches
     the same "Title <dates>" pattern get_column_a_songs() uses to
-    detect real song rows and would get silently parsed as a song with
-    an empty title if it ever ended up in that column (see
-    test_run_log_style_line_would_be_misparsed_if_ever_in_same_column).
+    detect real song rows and would get silently parsed as a bogus
+    song if it ever ended up in that column.
     """
-    try:
-        log_ws = sh.worksheet(RUN_LOG_WORKSHEET_NAME)
-    except gspread.exceptions.WorksheetNotFound:
-        log_ws = sh.add_worksheet(title=RUN_LOG_WORKSHEET_NAME, rows=1000, cols=1)
-
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     line = (
-        f"{timestamp} — Service {sing_date}: "
+        f"{utc_timestamp()} — Service {sing_date}: "
         f"{len(summary['created'])} created, {len(summary['updated'])} updated, "
         f"{len(summary['skipped'])} skipped"
     )
+    log_ws = get_or_create_run_log_tab(sh)
     log_ws.append_row([line])
-
-
-def sync_songs_to_sheet():
-    """
-    Sync this week's songs to the sheet.
-
-    Returns a summary dict: {"sing_date", "created", "updated", "skipped"}
-    (the latter three are lists of song titles). Raises on unrecoverable
-    errors (auth failure, no plan found, etc.) — the caller is
-    responsible for catching and reporting those.
-    """
-    # 1. Get songs from Planning Center first — the worksheet to write
-    # to depends on the service's actual year, so this has to happen
-    # before connecting to Sheets now.
-    print(f"Fetching recent plan and songs from Planning Center (Service Type {PCO_SERVICE_TYPE_ID})...")
-    plan, songs, sing_date = get_latest_plan_and_songs(PCO_SERVICE_TYPE_ID)
-    plan_date_label = plan["attributes"].get("dates", sing_date)
-    print(f"Plan ID {plan['id']} ({plan_date_label}) - Service Date: {sing_date}")
-    print(f"Found {len(songs)} song(s): {songs}\n")
-
-    sort_date = plan["attributes"].get("sort_date", "")
-    service_year = sort_date[:4] if sort_date else str(date.today().year)
-
-    # 2. Connect to Google Sheets, resolving year-rollover if configured
-    print(f"Connecting to Google Sheet '{SPREADSHEET_ID}' (configured tab '{WORKSHEET_NAME}')...")
-    gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = resolve_worksheet(sh, WORKSHEET_NAME, service_year)
-
-    summary = {"sing_date": sing_date, "created": [], "updated": [], "skipped": []}
-
-    if not songs:
-        print("No songs found in this plan.")
-        _try_log_run(sh, summary, sing_date)
-        return summary
-
-    # 3. Read existing songs in Column A
-    existing_songs, last_row = get_column_a_songs(ws)
-
-    # 4. Process each song
-    for song_title in songs:
-        norm_title = song_title.lower()
-
-        if norm_title in existing_songs:
-            entry = existing_songs[norm_title]
-            row_num = entry["row"]
-            existing_dates = entry["dates"]
-
-            # Check if date is already recorded
-            date_tokens = [d.strip() for d in re.split(r",\s*", existing_dates)]
-            if sing_date in date_tokens or any(d.startswith(sing_date) for d in date_tokens):
-                print(f"[SKIPPED] '{entry['title']}' already has date {sing_date} in Row {row_num}")
-                summary["skipped"].append(entry["title"])
-                continue
-
-            if existing_dates:
-                new_val = f"{entry['title']} {existing_dates}, {sing_date}"
-            else:
-                new_val = f"{entry['title']} {sing_date}"
-
-            ws.update_cell(row_num, 1, new_val)
-
-            # Update local cache
-            entry["dates"] = f"{existing_dates}, {sing_date}" if existing_dates else sing_date
-            entry["raw"] = new_val
-
-            print(f"[UPDATED] Row {row_num:2d}: '{new_val}'")
-            summary["updated"].append(entry["title"])
-        else:
-            # Create a new entry at the bottom of Column A
-            new_val = f"{song_title} {sing_date}"
-            ws.append_row([new_val])
-            last_row += 1
-            existing_songs[norm_title] = {
-                "row": last_row,
-                "title": song_title,
-                "dates": sing_date,
-                "raw": new_val,
-            }
-            print(f"[CREATED] Row {last_row:2d}: '{new_val}'")
-            summary["created"].append(song_title)
-
-    _try_log_run(sh, summary, sing_date)
-    return summary
 
 
 def _try_log_run(sh, summary, sing_date):
@@ -291,6 +151,109 @@ def _try_log_run(sh, summary, sing_date):
         log_run_to_sheet(sh, summary, sing_date)
     except Exception as exc:
         print(f"[WARNING] Could not write to '{RUN_LOG_WORKSHEET_NAME}' tab: {exc}")
+
+
+def _try_log_failure(sh, error_msg):
+    """Best-effort: write a failure entry to the Run Log tab. Swallows
+    any error here (e.g. if the Sheets connection itself is what broke) —
+    the caller already has the real error via stderr and re-raises it."""
+    try:
+        log_ws = get_or_create_run_log_tab(sh)
+        log_ws.append_row([f"{utc_timestamp()} — FAILED: {error_msg}"])
+    except Exception as log_exc:
+        print(f"[WARNING] Could not log failure to '{RUN_LOG_WORKSHEET_NAME}' tab: {log_exc}", file=sys.stderr)
+
+
+def sync_songs_to_sheet():
+    """
+    Sync this week's songs to the sheet.
+
+    Returns a summary dict: {"sing_date", "created", "updated", "skipped"}
+    (the latter three are lists of song titles). Raises on unrecoverable
+    errors — but first prints a stage-labeled failure message to stderr,
+    and (if a Sheets connection was established) logs it to the Run Log
+    tab, so a failure is debuggable from the sheet alone, not just by
+    re-reading raw CI logs.
+    """
+    sh = None
+    stage = "starting"
+    try:
+        stage = "fetching plan from Planning Center"
+        print(f"Fetching recent plan and songs from Planning Center (Service Type {PCO_SERVICE_TYPE_ID})...")
+        plan, songs, sing_date = get_latest_plan_and_songs(PCO_SERVICE_TYPE_ID)
+        plan_date_label = plan["attributes"].get("dates", sing_date)
+        print(f"Plan ID {plan['id']} ({plan_date_label}) - Service Date: {sing_date}")
+        print(f"Found {len(songs)} song(s): {songs}\n")
+
+        sort_date = plan["attributes"].get("sort_date", "")
+        service_year = sort_date[:4] if sort_date else str(date.today().year)
+
+        stage = "connecting to Google Sheets"
+        print(f"Connecting to Google Sheet '{SPREADSHEET_ID}' (configured tab '{WORKSHEET_NAME}')...")
+        gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
+        sh = gc.open_by_key(SPREADSHEET_ID)
+
+        stage = "resolving worksheet (year rollover check)"
+        ws = resolve_worksheet(sh, WORKSHEET_NAME, service_year)
+
+        summary = {"sing_date": sing_date, "created": [], "updated": [], "skipped": []}
+
+        if not songs:
+            print("No songs found in this plan.")
+            _try_log_run(sh, summary, sing_date)
+            return summary
+
+        stage = "reading existing songs from the sheet"
+        existing_songs, last_row = get_column_a_songs(ws)
+
+        stage = "processing songs"
+        for song_title in songs:
+            norm_title = song_title.lower()
+
+            if norm_title in existing_songs:
+                entry = existing_songs[norm_title]
+                row_num = entry["row"]
+                existing_dates = entry["dates"]
+
+                date_tokens = [d.strip() for d in re.split(r",\s*", existing_dates)]
+                if sing_date in date_tokens or any(d.startswith(sing_date) for d in date_tokens):
+                    print(f"[SKIPPED] '{entry['title']}' already has date {sing_date} in Row {row_num}")
+                    summary["skipped"].append(entry["title"])
+                    continue
+
+                if existing_dates:
+                    new_val = f"{entry['title']} {existing_dates}, {sing_date}"
+                else:
+                    new_val = f"{entry['title']} {sing_date}"
+
+                ws.update_cell(row_num, 1, new_val)
+                entry["dates"] = f"{existing_dates}, {sing_date}" if existing_dates else sing_date
+                entry["raw"] = new_val
+
+                print(f"[UPDATED] Row {row_num:2d}: '{new_val}'")
+                summary["updated"].append(entry["title"])
+            else:
+                new_val = f"{song_title} {sing_date}"
+                ws.append_row([new_val])
+                last_row += 1
+                existing_songs[norm_title] = {
+                    "row": last_row,
+                    "title": song_title,
+                    "dates": sing_date,
+                    "raw": new_val,
+                }
+                print(f"[CREATED] Row {last_row:2d}: '{new_val}'")
+                summary["created"].append(song_title)
+
+        _try_log_run(sh, summary, sing_date)
+        return summary
+
+    except Exception as exc:
+        error_msg = f"Failed while {stage}: {exc}"
+        print(f"\n[FAILED] {error_msg}", file=sys.stderr)
+        if sh is not None:
+            _try_log_failure(sh, error_msg)
+        raise
 
 
 def print_summary(summary):
@@ -305,7 +268,8 @@ if __name__ == "__main__":
     try:
         result = sync_songs_to_sheet()
         print_summary(result)
-    except Exception as exc:
-        print(f"\n[FAILED] Sync did not complete: {exc}", file=sys.stderr)
+    except Exception:
+        # Detailed failure message (with stage context) and a best-effort
+        # Run Log entry are already handled inside sync_songs_to_sheet().
         sys.exit(1)
     sys.exit(0)

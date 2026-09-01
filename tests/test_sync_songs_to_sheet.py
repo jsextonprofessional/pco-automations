@@ -7,6 +7,8 @@ the real Planning Center API.
 
 from unittest.mock import patch
 
+import pytest
+
 import pco_script
 from tests.fakes import FakeSpreadsheet, FakeWorksheet, patch_gspread
 
@@ -128,3 +130,37 @@ def test_sync_triggers_year_rollover_when_configured_tab_is_stale(monkeypatch):
     assert summary["created"] == ["New Year Song"]
     assert new_ws.rows[-1] == "New Year Song 1/3"
     assert new_ws.rows[0] == "2027 Song Bank"
+
+
+def test_failure_after_sheets_connection_logs_to_run_log_with_stage(monkeypatch):
+    """When something fails partway through — after a Sheets connection
+    exists — the failure should land in the Run Log tab with context
+    about which stage broke, not just vanish into a stack trace."""
+    log_ws = FakeWorksheet([])
+    spreadsheet = FakeSpreadsheet({"TEST": FakeWorksheet([]), "Run Log": log_ws})
+    patch_gspread(monkeypatch, pco_script, spreadsheet)
+
+    fake_plan = {"id": "p1", "attributes": {"dates": "8/30"}}
+
+    with patch("pco_script.get_latest_plan_and_songs", return_value=(fake_plan, ["Song A"], "8/30")):
+        with patch("pco_script.get_column_a_songs", side_effect=RuntimeError("simulated Sheets failure")):
+            with pytest.raises(RuntimeError):
+                pco_script.sync_songs_to_sheet()
+
+    assert len(log_ws.rows) == 1
+    assert "FAILED" in log_ws.rows[0]
+    assert "reading existing songs" in log_ws.rows[0]
+    assert "simulated Sheets failure" in log_ws.rows[0]
+
+
+def test_failure_before_sheets_connection_does_not_crash_on_missing_sh(monkeypatch, capsys):
+    """If Planning Center itself fails before any Sheets connection
+    exists, there's nothing to log to — should still raise cleanly,
+    not crash on referencing a connection that was never established."""
+    with patch("pco_script.get_latest_plan_and_songs", side_effect=RuntimeError("PCO auth failed")):
+        with pytest.raises(RuntimeError):
+            pco_script.sync_songs_to_sheet()
+
+    captured = capsys.readouterr()
+    assert "FAILED" in captured.err
+    assert "fetching plan from Planning Center" in captured.err
