@@ -5,6 +5,7 @@ env/
 
 # Environment variables & secrets
 .env
+.env.mcp-test
 *.json
 !package.json
 !tsconfig.json
