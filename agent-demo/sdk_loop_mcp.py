@@ -38,7 +38,7 @@ import gspread
 from sheet_utils import log_agent_run
 
 gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
-sh = gc.open_by_key(SPREADSHEET_ID)
+sh = gc.open_by_key(SPREADSHEET_ID) # type: ignore
 
 # The MCP server's own get_existing_songs/append_date_to_song calls
 # validate against sing_date server-side isn't done here — that logic

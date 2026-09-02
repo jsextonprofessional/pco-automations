@@ -49,7 +49,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from sheet_utils import log_agent_run
 
 gc = gspread.service_account(filename=SHEETS_SERVICE_ACCOUNT_FILE)
-sh = gc.open_by_key(SPREADSHEET_ID)
+sh = gc.open_by_key(SPREADSHEET_ID) # type: ignore
 ws = sh.worksheet(WORKSHEET_NAME)
 
 # Scratchpad — same role it played in agent_loop.py: translates the
