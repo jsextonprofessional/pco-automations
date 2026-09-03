@@ -120,4 +120,10 @@ def tracking_sheet_state() -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # Stage 4: streamable HTTP instead of stdio. host="127.0.0.1" here is
+    # correct for local testing — the MCP SDK auto-enables DNS rebinding
+    # protection when host is a loopback address with no transport_security
+    # passed. When this moves behind a real hostname on Cloud Run, that
+    # auto-protection stops applying and transport_security must be set
+    # explicitly (see Phase 2/3) or every request gets a 421.
+    mcp.run(transport="streamable-http", host="127.0.0.1", port=8000)
