@@ -7,9 +7,16 @@ this file is a thin wrapper. It imports and calls song_tools.py
 directly; it does not reimplement any PCO/Sheets API calls. That's
 the whole point of the port: same behavior, different transport.
 
-Run standalone to smoke-test:
+Stage 4: streamable HTTP transport, deployed to Fly.io, bearer-token
+authenticated. Run standalone to smoke-test:
     <venv>/bin/python mcp/pco_server.py
-Should hang silently (stdio loop running). Ctrl+C to exit.
+Serves on http://127.0.0.1:8000/mcp (or MCP_HOST/MCP_PORT if set) with
+no console output on success. Ctrl+C to exit.
+
+Requires MCP_BEARER_TOKEN in the environment — generate one with:
+    python -c "import secrets; print(secrets.token_urlsafe(32))"
+Every request needs "Authorization: Bearer <that token>" or it's
+rejected with a 401 before any tool code runs.
 
 Point WORKSHEET_NAME at a duplicate/test tab before wiring this into
 sdk_loop.py's write paths — same caution as agent_loop.py and
@@ -29,7 +36,11 @@ sys.path.insert(
 )
 
 import gspread
+from pydantic import AnyHttpUrl
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 
 from song_tools import (
     get_this_weeks_songs as _get_this_weeks_songs,
@@ -41,7 +52,71 @@ from song_tools import (
     WORKSHEET_NAME,
 )
 
-mcp = MCPServer("pco-song-sync")
+# song_tools.py already raises at import time if SPREADSHEET_ID is unset —
+# this assert just narrows the type for the checker from str | None to
+# str, since that guarantee doesn't carry across the module boundary.
+assert SPREADSHEET_ID is not None
+
+# Host/port/hostname need to be known now, not just at run() time, because
+# AuthSettings.resource_server_url is baked into the MCPServer at
+# construction. transport_security (below) is still passed to run() —
+# that one really is transport-only, per the SDK — but the same
+# host/hostname logic feeds both, so it's computed once, here.
+MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.environ.get("MCP_PORT", "8000"))
+FLY_APP_NAME = os.environ.get("FLY_APP_NAME")
+
+if FLY_APP_NAME:
+    _hostname = f"{FLY_APP_NAME}.fly.dev"
+    PUBLIC_BASE_URL = f"https://{_hostname}"
+else:
+    _hostname = None
+    PUBLIC_BASE_URL = f"http://{MCP_HOST}:{MCP_PORT}"
+
+RESOURCE_SERVER_URL = f"{PUBLIC_BASE_URL}/mcp"
+
+# --- Auth: bearer-token resource server ---
+#
+# Single trusted client today (you), so there's no separate authorization
+# server issuing tokens through a login flow — you mint the token yourself
+# and hand it to whatever's calling this server. The server's job is only
+# the resource-server half: check the Authorization header, accept or
+# reject. If a second real client ever needs its own token, add it to
+# _VALID_TOKENS (or swap this for a real lookup) rather than sharing one
+# token across consumers.
+#
+# MCP_BEARER_TOKEN must be set — generate one with:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+_BEARER_TOKEN = os.environ.get("MCP_BEARER_TOKEN")
+if not _BEARER_TOKEN:
+    raise ValueError(
+        "Missing MCP_BEARER_TOKEN in environment / .env file. Generate one "
+        "with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+    )
+_VALID_TOKENS = {
+    _BEARER_TOKEN: AccessToken(token=_BEARER_TOKEN, client_id="pco-agent", scopes=["pco:sync"]),
+}
+
+
+class StaticTokenVerifier(TokenVerifier):
+    async def verify_token(self, token: str) -> AccessToken | None:
+        return _VALID_TOKENS.get(token)
+
+
+mcp = MCPServer(
+    "pco-song-sync",
+    token_verifier=StaticTokenVerifier(),
+    auth=AuthSettings(
+        # No real external authorization server exists yet, so this is a
+        # placeholder rather than a live discovery URL — nothing in this
+        # setup does a full OAuth discovery round-trip against it, since
+        # the one client attaches MCP_BEARER_TOKEN directly. It only needs
+        # to be a well-formed URL to satisfy AuthSettings' schema.
+        issuer_url=AnyHttpUrl(PUBLIC_BASE_URL),
+        resource_server_url=AnyHttpUrl(RESOURCE_SERVER_URL),
+        required_scopes=["pco:sync"],
+    ),
+)
 
 # Sheet handle is opened once at process start and reused across every
 # tool call for the life of this server process — same pattern as
@@ -120,10 +195,31 @@ def tracking_sheet_state() -> str:
 
 
 if __name__ == "__main__":
-    # Stage 4: streamable HTTP instead of stdio. host="127.0.0.1" here is
-    # correct for local testing — the MCP SDK auto-enables DNS rebinding
-    # protection when host is a loopback address with no transport_security
-    # passed. When this moves behind a real hostname on Cloud Run, that
-    # auto-protection stops applying and transport_security must be set
-    # explicitly (see Phase 2/3) or every request gets a 421.
-    mcp.run(transport="streamable-http", host="127.0.0.1", port=8000)
+    # Local (Phase 1): 127.0.0.1, no explicit transport_security needed —
+    # the SDK auto-enables DNS rebinding protection for loopback hosts.
+    #
+    # Deployed (Phase 2): bind 0.0.0.0 (Fly's proxy terminates TLS and
+    # forwards here) and explicitly allowlist the *.fly.dev hostname —
+    # without this, every request gets a 421, since Fly's hostname isn't
+    # loopback and the auto-protection stops applying.
+    security = None
+    if _hostname:
+        security = TransportSecuritySettings(
+            allowed_hosts=[_hostname, f"{_hostname}:*"],
+            allowed_origins=[f"https://{_hostname}"],
+        )
+
+    mcp.run(
+        transport="streamable-http",
+        host=MCP_HOST,
+        port=MCP_PORT,
+        transport_security=security,
+        # No sampling, elicitation, or subscriptions here — just tool
+        # calls and one resource read, so there's nothing that needs a
+        # persistent session. Stateless mode means every request is
+        # self-contained, which is what actually makes auto_stop_machines
+        # safe to keep: with sessions, a machine stopping between two
+        # requests loses the session and the client gets "Session not
+        # found" on the next call, which is exactly what just happened.
+        stateless_http=True,
+    )

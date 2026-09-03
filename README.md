@@ -173,3 +173,5 @@ This project automates that work, and also a way for me to explore and deep dive
 - This is the solution in production. It is the simplest and cheapest. A Python script that runs weekly on a cron job. Falls in GitHub's free tier and handles all the work needed.
 
 There is also the backfill script. There isn't much of a reason for it to be used again as the backfills have already been performed. It is such a powerful tool in its ability to quickly process a lot of data, that google rate limits it - 🤠. Leaving it in for future reference. Can also come in handy if we ever create a new song bank.
+
+See mcp/README.md for the MCP server (Waypoint-02)
