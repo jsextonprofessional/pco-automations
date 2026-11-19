@@ -112,11 +112,18 @@ Appends a test row to the configured worksheet. Remember to remove the test row 
 
 ### 1. Regular Weekly Sync
 
-Runs the latest completed service plan and updates Column A:
+The weekly GitHub Actions workflow uses `backfill.py` to catch up every
+completed plan from the previous 90 days. Processing a rolling range makes
+the sync self-healing after a missed or failed run, while idempotent date
+checks prevent duplicate entries:
 
 ```bash
-python pco_script.py
+python backfill.py --start 2026-08-21 --end 2026-11-19
 ```
+
+For a manual catch-up outside GitHub Actions, pass the desired range to
+`backfill.py` as shown below. The workflow can also be dispatched manually
+with custom start and end dates.
 
 ### 2. Historical Backfill
 

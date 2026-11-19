@@ -9,7 +9,20 @@ on:
     # if you want it to stay at true noon; otherwise the hour of drift
     # doesn't affect correctness, just timing.
     - cron: "0 17 * * 1"
-  workflow_dispatch: # lets you trigger a run manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Optional exclusive start date (YYYY-MM-DD); defaults to 90 days ago"
+        required: false
+        type: string
+      end_date:
+        description: "Optional inclusive end date (YYYY-MM-DD); defaults to today"
+        required: false
+        type: string
+
+concurrency:
+  group: weekly-song-bank-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -38,15 +51,18 @@ jobs:
           PCO_SERVICE_TYPE_ID: ${{ secrets.PCO_SERVICE_TYPE_ID }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_FILE: service_account.json
-          WORKSHEET_NAME: "2026"
-        run: python pco_script.py
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          start_date="${START_DATE:-$(date -u -d '90 days ago' +%F)}"
+          end_date="${END_DATE:-$(date -u +%F)}"
+          echo "Catching up plans after ${start_date} through ${end_date}"
+          python backfill.py --start "$start_date" --end "$end_date"
 
-      # The steps below run even if "Run sync" fails (if: always()) —
-      # the heartbeat commit exists specifically to keep GitHub's
-      # 60-day auto-disable from ever triggering, which matters most
-      # during a stretch of failures, not despite them. The job's
-      # overall status still reports failure if the sync step failed,
-      # so failure notifications are unaffected.
+      # These steps keep the scheduled workflow active even if the sync
+      # fails. The heartbeat goes to a dedicated, unprotected branch:
+      # pushing directly to protected main was rejected and made every
+      # otherwise-successful sync appear to fail.
 
       - name: Record run timestamp
         if: always()
@@ -59,4 +75,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last_run.txt
           git diff --staged --quiet || git commit -m "chore: automated sync heartbeat"
-          git push
+          git push --force origin HEAD:refs/heads/automation-heartbeat
